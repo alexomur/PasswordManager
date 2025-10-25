@@ -2,16 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Простой локальный менеджер паролей.
-Хранение: JSON-файл (без шифрования), по умолчанию рядом со скриптом/EXE.
-Под тесты: чёткий API PasswordStore, стабильные коды выхода, CLI и wizard.
-
-Валидация:
-- service обязателен, без пробелов и слэшей (минимум защиты от ошибок пользователя).
-- username/password/notes могут быть пустыми.
-- Если все поля, кроме service, пустые — создаётся «пустой сервис» (контейнер), запись логина/пароля не добавляется.
 """
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -57,10 +48,10 @@ def validate_username(u: str) -> str:
     return (u or "").strip()
 
 def validate_password(p: str) -> str:
-    return (p or "")
+    return p or ""
 
 def validate_notes(n: str) -> str:
-    return (n or "")
+    return n or ""
 
 # -------------------- Путь БД по умолчанию (рядом со скриптом) --------------------
 def default_db_path() -> Path:
@@ -146,7 +137,7 @@ class PasswordStore:
         data = self.storage.load()
         services = data.setdefault("services", {})
 
-        # «Только сервис»: username/password/notes пустые
+        # "Только сервис": username/password/notes пустые
         if e.username == "" and e.password == "" and e.notes == "":
             services.setdefault(e.service, {})
             self.storage.save(data)
@@ -157,12 +148,6 @@ class PasswordStore:
             raise EntryExistsError(f"{e.service}/{e.username}")
         e.updated_at = Entry.now_iso()
         service_map[e.username] = asdict(e)
-        self.storage.save(data)
-
-    def ensure_service(self, service: str) -> None:
-        s = validate_service(service)
-        data = self.storage.load()
-        data.setdefault("services", {}).setdefault(s, {})
         self.storage.save(data)
 
     def get(self, service: str, username: str) -> Dict[str, Any]:
@@ -212,6 +197,12 @@ class PasswordStore:
             for user in sorted(services[svc]):
                 res.append(f"{svc}/{user}")
         return res
+
+    def ensure_service(self, service: str) -> None:
+        s = validate_service(service)
+        data = self.storage.load()
+        data.setdefault("services", {}).setdefault(s, {})
+        self.storage.save(data)
 
 # -------------------- Ввод пароля --------------------
 def read_password(args: argparse.Namespace, *, prompt_hidden: str = "Пароль: ", prompt_plain: str = "Пароль (видимый): ") -> str:
