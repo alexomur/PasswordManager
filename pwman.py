@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Простой локальный менеджер паролей.
-"""
 import argparse
+import hashlib
 import json
 import os
 import re
+import secrets
 import sys
 import tempfile
 from dataclasses import dataclass, asdict
@@ -23,7 +20,7 @@ EXIT_IOERR = 74
 EXIT_NOT_FOUND = 2
 EXIT_EXISTS = 17
 
-DB_VERSION = 1
+DB_VERSION = 2
 
 # -------------------- Ошибки --------------------
 class PwmanError(Exception): ...
@@ -48,10 +45,10 @@ def validate_username(u: str) -> str:
     return (u or "").strip()
 
 def validate_password(p: str) -> str:
-    return p or ""
+    return (p or "")
 
 def validate_notes(n: str) -> str:
-    return n or ""
+    return (n or "")
 
 # -------------------- Путь БД по умолчанию (рядом со скриптом) --------------------
 def default_db_path() -> Path:
@@ -80,10 +77,48 @@ class Entry:
     def now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+# -------------------- Мастер-пароль (НЕ шифрование, только проверка доступа) --------------------
+def _mk_master_hash(master: str) -> Dict[str, str]:
+    salt = secrets.token_hex(16)
+    h = hashlib.sha256((salt + (master or "")).encode("utf-8")).hexdigest()
+    return {"salt": salt, "hash": h}
+
+def _check_master(master: str, rec: Dict[str, str]) -> bool:
+    salt = rec.get("salt", "")
+    expected = rec.get("hash", "")
+    got = hashlib.sha256((salt + (master or "")).encode("utf-8")).hexdigest()
+    return secrets.compare_digest(got, expected)
+
+# -------------------- Общие утилиты --------------------
+def _ensure_version(data: Dict[str, Any]) -> None:
+    """Гарантируем актуальную версию при записи."""
+    if isinstance(data, dict):
+        data["version"] = DB_VERSION
+
+def _prompt_secret(prompt_hidden: str, prompt_visible: str) -> str:
+    """
+    Безопасный ввод с фоллбеком:
+      - пробуем getpass();
+      - если терминал не поддерживает скрытый ввод или EOF — падаем на input().
+    """
+    try:
+        val = getpass(prompt_hidden)
+        # Если вдруг в редких окружениях getpass «повис» без эха — пользователь всё равно введёт и нажмёт Enter
+        return val
+    except (Exception, KeyboardInterrupt, EOFError):
+        # Фоллбек (видимый ввод)
+        try:
+            return input(prompt_visible)
+        except (KeyboardInterrupt, EOFError):
+            return ""
+
 # -------------------- Хранилище --------------------
 class JsonStorage:
-    def __init__(self, path: Path) -> None:
+    """Работа с JSON-файлом. Если в БД установлен master, то при доступе требуется верный master."""
+
+    def __init__(self, path: Path, master: Optional[str] = None) -> None:
         self.path = Path(path)
+        self.master = master
 
     def load(self) -> Dict[str, Any]:
         if not self.path.exists():
@@ -95,12 +130,23 @@ class JsonStorage:
             raise DataFormatError(f"Ошибка чтения JSON: {e}") from e
         except OSError as e:
             raise StorageAccessError(f"Ошибка доступа к БД: {e}") from e
+
         if not isinstance(data, dict) or "services" not in data:
             raise DataFormatError("Неверный формат базы паролей")
+
+        # Проверка мастера, если он есть
+        meta = data.get("meta", {})
+        master_rec = meta.get("master")
+        if master_rec:
+            if self.master is None:
+                raise StorageAccessError("Требуется мастер-пароль")
+            if not _check_master(self.master, master_rec):
+                raise StorageAccessError("Неверный мастер-пароль")
         return data
 
     def save(self, data: Dict[str, Any]) -> None:
         try:
+            _ensure_version(data)
             self._atomic_write_json(data)
         except OSError as e:
             raise StorageAccessError(f"Ошибка записи БД: {e}") from e
@@ -128,6 +174,18 @@ class PasswordStore:
     def __init__(self, storage: JsonStorage) -> None:
         self.storage = storage
 
+    # ---- мастер-пароль ----
+    def init_master(self, master: str) -> None:
+        """Устанавливает мастер-пароль, если он ещё не установлен."""
+        data = self.storage.load()
+        meta = data.setdefault("meta", {})
+        if meta.get("master"):
+            raise ValidationError("Мастер-пароль уже установлен")
+        meta["master"] = _mk_master_hash(master)
+        _ensure_version(data)
+        self.storage.save(data)
+
+    # ---- CRUD ----
     def add(self, e: Entry, overwrite: bool = False) -> None:
         e.service  = validate_service(e.service)
         e.username = validate_username(e.username)
@@ -137,9 +195,10 @@ class PasswordStore:
         data = self.storage.load()
         services = data.setdefault("services", {})
 
-        # "Только сервис": username/password/notes пустые
+        # «Только сервис»: username/password/notes пустые
         if e.username == "" and e.password == "" and e.notes == "":
             services.setdefault(e.service, {})
+            _ensure_version(data)
             self.storage.save(data)
             return
 
@@ -148,6 +207,14 @@ class PasswordStore:
             raise EntryExistsError(f"{e.service}/{e.username}")
         e.updated_at = Entry.now_iso()
         service_map[e.username] = asdict(e)
+        _ensure_version(data)
+        self.storage.save(data)
+
+    def ensure_service(self, service: str) -> None:
+        s = validate_service(service)
+        data = self.storage.load()
+        data.setdefault("services", {}).setdefault(s, {})
+        _ensure_version(data)
         self.storage.save(data)
 
     def get(self, service: str, username: str) -> Dict[str, Any]:
@@ -172,6 +239,7 @@ class PasswordStore:
         if notes is not None:
             entry["notes"] = validate_notes(notes)
         entry["updated_at"] = Entry.now_iso()
+        _ensure_version(data)
         self.storage.save(data)
 
     def delete(self, service: str, username: str) -> None:
@@ -184,6 +252,7 @@ class PasswordStore:
         del services[service][username]
         if not services[service]:
             del services[service]
+        _ensure_version(data)
         self.storage.save(data)
 
     def list(self, service: Optional[str] = None) -> List[str]:
@@ -198,13 +267,7 @@ class PasswordStore:
                 res.append(f"{svc}/{user}")
         return res
 
-    def ensure_service(self, service: str) -> None:
-        s = validate_service(service)
-        data = self.storage.load()
-        data.setdefault("services", {}).setdefault(s, {})
-        self.storage.save(data)
-
-# -------------------- Ввод пароля --------------------
+# -------------------- Ввод секретов --------------------
 def read_password(args: argparse.Namespace, *, prompt_hidden: str = "Пароль: ", prompt_plain: str = "Пароль (видимый): ") -> str:
     if getattr(args, "password", None):
         return args.password
@@ -212,7 +275,7 @@ def read_password(args: argparse.Namespace, *, prompt_hidden: str = "Парол�
         return sys.stdin.read().rstrip("\n")
     if getattr(args, "password_input", False):
         return input(prompt_plain)
-    return getpass(prompt_hidden)
+    return _prompt_secret(prompt_hidden, prompt_plain)
 
 # -------------------- Команды CLI --------------------
 def cmd_add(args: argparse.Namespace) -> None:
@@ -248,7 +311,7 @@ def cmd_update(args: argparse.Namespace) -> None:
         elif args.password_input:
             new_pwd = input("Новый пароль (видимый): ")
         else:
-            new_pwd = getpass("Новый пароль: ")
+            new_pwd = _prompt_secret("Новый пароль: ", "Новый пароль (видимый): ")
     store.update(args.service, args.username, password=new_pwd, notes=args.notes)
     print(f"OK: обновлено {validate_service(args.service)}/{args.username}")
 
@@ -261,7 +324,6 @@ def cmd_list(args: argparse.Namespace) -> None:
     store = PasswordStore(JsonStorage(args.db))
     if args.service:
         users = store.list(args.service)
-        # важно для SDD: если пусто — ничего не печатаем
         for u in users:
             print(u)
         return
@@ -271,47 +333,119 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 # -------------------- Wizard (input). При запуске без аргументов — бесконечный цикл. --------------------
 def cmd_wizard(args: argparse.Namespace, *, inp: Callable[[str], str] = input, out: Callable[[str], None] = print) -> bool:
-    store = PasswordStore(JsonStorage(args.db))
-    out("Выберите операцию: add / get / update / delete / list / exit")
-    op = inp("> ").strip().lower()
+    """
+    Интерактивный режим. Команды:
+      add / get / update / delete / list / init-master / exit
+    """
+    storage = JsonStorage(args.db)  # без мастера; если потребуется — спросим
+    store = PasswordStore(storage)
+
+    out("Выберите операцию: add / get / update / delete / list / init-master / exit")
+    try:
+        op = inp("> ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        out("Выход.")
+        return False
+
     if op in ("exit", "quit", "q"):
         out("Выход.")
         return False
+
     try:
-        if op == "add":
+        if op == "init-master":
+            # Если мастер уже установлен, load() без master выбросит ошибку доступа — считаем, что уже стоит
+            try:
+                data = storage.load()
+                if data.get("meta", {}).get("master"):
+                    out("ОШИБКА: мастер-пароль уже установлен")
+                    return True
+            except StorageAccessError:
+                out("ОШИБКА: мастер-пароль уже установлен")
+                return True
+
+            m1 = _prompt_secret("Новый мастер-пароль: ", "Новый мастер-пароль (видимый): ")
+            if m1 == "":
+                out("ОШИБКА: пустой мастер-пароль")
+                return True
+            m2 = _prompt_secret("Повторите мастер-пароль: ", "Повторите мастер-пароль (видимый): ")
+            if m1 != m2:
+                out("ОШИБКА: пароли не совпадают")
+                return True
+            PasswordStore(JsonStorage(args.db)).init_master(m1)
+            out("OK: мастер-пароль установлен")
+            return True
+
+        elif op == "add":
             service = inp("Сервис: ").strip()
             username = inp("Логин (можно пусто): ").strip()
             if username == "":
-                store.ensure_service(service)
+                try:
+                    store.ensure_service(service)
+                except StorageAccessError:
+                    m = _prompt_secret("Мастер-пароль: ", "Мастер-пароль (видимый): ")
+                    store = PasswordStore(JsonStorage(args.db, master=m))
+                    store.ensure_service(service)
                 out(f"OK: создан пустой сервис '{validate_service(service)}'")
                 return True
             password = inp("Пароль (видимый): ")
             notes = inp("Примечания (необязательно): ")
-            store.add(Entry(service, username, password, notes))
+            try:
+                store.add(Entry(service, username, password, notes))
+            except StorageAccessError:
+                m = _prompt_secret("Мастер-пароль: ", "Мастер-пароль (видимый): ")
+                store = PasswordStore(JsonStorage(args.db, master=m))
+                store.add(Entry(service, username, password, notes))
             out(f"OK: сохранено {validate_service(service)}/{username}")
+
         elif op == "get":
             service = inp("Сервис: ").strip()
             username = inp("Логин: ").strip()
-            out(store.get(service, username)["password"])
+            try:
+                out(store.get(service, username)["password"])
+            except StorageAccessError:
+                m = _prompt_secret("Мастер-пароль: ", "Мастер-пароль (видимый): ")
+                store = PasswordStore(JsonStorage(args.db, master=m))
+                out(store.get(service, username)["password"])
+
         elif op == "update":
             service = inp("Сервис: ").strip()
             username = inp("Логин: ").strip()
             new_pwd = inp("Новый пароль (пусто — без изменения): ")
             new_notes = inp("Новые примечания (пусто — без изменения): ")
-            store.update(service, username,
-                         password=(new_pwd if new_pwd else None),
-                         notes=(new_notes if new_notes else None))
+            try:
+                store.update(service, username,
+                             password=(new_pwd if new_pwd else None),
+                             notes=(new_notes if new_notes else None))
+            except StorageAccessError:
+                m = _prompt_secret("Мастер-пароль: ", "Мастер-пароль (видимый): ")
+                store = PasswordStore(JsonStorage(args.db, master=m))
+                store.update(service, username,
+                             password=(new_pwd if new_pwd else None),
+                             notes=(new_notes if new_notes else None))
             out(f"OK: обновлено {validate_service(service)}/{username}")
+
         elif op == "delete":
             service = inp("Сервис: ").strip()
             username = inp("Логин: ").strip()
-            store.delete(service, username)
+            try:
+                store.delete(service, username)
+            except StorageAccessError:
+                m = _prompt_secret("Мастер-пароль: ", "Мастер-пароль (видимый): ")
+                store = PasswordStore(JsonStorage(args.db, master=m))
+                store.delete(service, username)
             out(f"OK: удалено {validate_service(service)}/{username}")
+
         elif op == "list":
             svc = inp("Сервис (пусто — все): ").strip()
-            items = store.list(svc or None)
+            try:
+                items = store.list(svc or None)
+            except StorageAccessError:
+                m = _prompt_secret("Мастер-пароль: ", "Мастер-пароль (видимый): ")
+                store = PasswordStore(JsonStorage(args.db, master=m))
+                items = store.list(svc or None)
             for it in items:
                 out(it)
+
         else:
             out("Неизвестная операция")
     except (ValidationError, EntryExistsError, EntryNotFoundError, StorageAccessError, DataFormatError) as e:
@@ -390,7 +524,7 @@ def _reorder_global_db(argv: list[str]) -> list[str]:
 
 def main(argv: Optional[list[str]] = None) -> int:
     raw_argv = argv if argv is not None else sys.argv[1:]
-    # если без аргументов — бесконечный wizard
+    # если без аргументов — бесконечный wizard с пунктом init-master
     if len(raw_argv) == 0:
         args = argparse.Namespace(db=default_db_path())
         try:

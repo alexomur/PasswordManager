@@ -23,3 +23,23 @@ def test_not_found(store):
 def test_service_validation(store):
     with pytest.raises(pwman.ValidationError):
         store.add(pwman.Entry(service="bad service", username="", password=""))
+
+def test_master_init_and_access(tmp_path):
+    db = tmp_path / "db.json"
+
+    # Инициализируем БД и ставим мастер-пароль
+    store = pwman.PasswordStore(pwman.JsonStorage(db))
+    store.init_master("secret")
+
+    # Без мастера доступ запрещён
+    with pytest.raises(pwman.StorageAccessError):
+        pwman.PasswordStore(pwman.JsonStorage(db)).list()
+
+    # С неверным мастером тоже
+    with pytest.raises(pwman.StorageAccessError):
+        pwman.PasswordStore(pwman.JsonStorage(db, master="wrong")).list()
+
+    # С верным мастером всё работает
+    s2 = pwman.PasswordStore(pwman.JsonStorage(db, master="secret"))
+    s2.add(pwman.Entry("svc", "u", "p"))
+    assert s2.get("svc", "u")["password"] == "p"
