@@ -1,0 +1,61 @@
+Run started:2025-11-21 20:27:07.646980+00:00
+
+Test results:
+>> Issue: [B105:hardcoded_password_string] Possible hardcoded password: 'SuperSecret123'
+   Severity: Low   Confidence: Medium
+   CWE: CWE-259 (https://cwe.mitre.org/data/definitions/259.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.1/plugins/b105_hardcoded_password_string.html
+   Location: .\pwman.py:28:21
+27	# 1) Захардкоженный пароль (Bandit B105, Ruff S105 при включённых security-правилах)
+28	HARDCODED_PASSWORD = "SuperSecret123"  # BUG_FOR_LAB: hardcoded password
+29	
+
+--------------------------------------------------
+>> Issue: [B307:blacklist] Use of possibly insecure function - consider using safer ast.literal_eval.
+   Severity: Medium   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.1/blacklists/blacklist_calls.html#b307-eval
+   Location: .\pwman.py:38:11
+37	def _debug_eval(expr: str) -> Any:  # BUG_FOR_LAB: использование eval
+38	    return eval(expr)
+39	
+
+--------------------------------------------------
+>> Issue: [B306:blacklist] Use of insecure and deprecated function (mktemp).
+   Severity: Medium   Confidence: High
+   CWE: CWE-377 (https://cwe.mitre.org/data/definitions/377.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.1/blacklists/blacklist_calls.html#b306-mktemp-q
+   Location: .\pwman.py:42:11
+41	def _insecure_tempfile() -> str:  # BUG_FOR_LAB: использование tempfile.mktemp()
+42	    return tempfile.mktemp()
+43	
+
+--------------------------------------------------
+>> Issue: [B105:hardcoded_password_string] Possible hardcoded password: ''
+   Severity: Low   Confidence: Medium
+   CWE: CWE-259 (https://cwe.mitre.org/data/definitions/259.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.1/plugins/b105_hardcoded_password_string.html
+   Location: .\pwman.py:218:46
+217	        # «Только сервис»: username/password/notes пустые
+218	        if e.username == "" and e.password == "" and e.notes == "":
+219	            services.setdefault(e.service, {})
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 503
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 2
+		Medium: 2
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 2
+		High: 2
+Files skipped (0):

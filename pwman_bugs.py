@@ -6,6 +6,7 @@ import re
 import secrets
 import sys
 import tempfile
+import math  # BUG_FOR_LAB: неиспользуемый импорт (Ruff F401)
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from getpass import getpass
@@ -22,9 +23,25 @@ EXIT_EXISTS = 17
 
 DB_VERSION = 2
 
-# моки
+# -------------------- ИСКУССТВЕННЫЕ ОШИБКИ ДЛЯ ЛАБЫ --------------------
+# 1) Захардкоженный пароль (Bandit B105, Ruff S105 при включённых security-правилах)
+HARDCODED_PASSWORD = "SuperSecret123"  # BUG_FOR_LAB: hardcoded password
 
-_LEAK_BUCKET: List[bytes] = []
+# 2) Конфликт типов для mypy + неиспользуемая переменная для Ruff
+def _debug_add_ints(a: int, b: int) -> int:
+    return a + b
+
+debug_str: str = _debug_add_ints(1, 2)  # BUG_FOR_LAB: mypy — несовместимый тип (int -> str), Ruff — неиспользуемая переменная
+
+# 3) Небезопасный eval (Bandit B307)
+def _debug_eval(expr: str) -> Any:  # BUG_FOR_LAB: использование eval
+    return eval(expr)
+
+# 4) Небезопасный mktemp (Bandit B108)
+def _insecure_tempfile() -> str:  # BUG_FOR_LAB: использование tempfile.mktemp()
+    return tempfile.mktemp()
+
+_LEAK_BUCKET: List[bytes] = []  # BUG_FOR_LAB_MPROF: глобальное хранилище, никогда не очищается
 
 def run_leak_demo(iterations: int = 100) -> None:
     """
@@ -32,8 +49,11 @@ def run_leak_demo(iterations: int = 100) -> None:
     На каждой итерации добавляем ~100 KB в глобальный список и немного ждём,
     чтобы mprof успевал снимать сэмплы.
     """
+    import time
+    for i in range(iterations):
+        _LEAK_BUCKET.append(b"x" * 100_000)  # +~100 KB на шаг
+        time.sleep(0.05)  # всего ~5 секунд работы
     print("done!")
-    return
 
 def cmd_leak_demo(args: argparse.Namespace) -> None:
     """Команда для лабораторной работы: запускает сценарий с утечкой памяти."""
@@ -204,10 +224,10 @@ class PasswordStore:
 
     # ---- CRUD ----
     def add(self, e: Entry, overwrite: bool = False) -> None:
-        e.service  = validate_service(e.service)
+        e.service = validate_service(e.service)
         e.username = validate_username(e.username)
         e.password = validate_password(e.password)
-        e.notes    = validate_notes(e.notes)
+        e.notes = validate_notes(e.notes)
 
         data = self.storage.load()
         services = data.setdefault("services", {})
@@ -430,15 +450,21 @@ def cmd_wizard(args: argparse.Namespace, *, inp: Callable[[str], str] = input, o
             new_pwd = inp("Новый пароль (пусто — без изменения): ")
             new_notes = inp("Новые примечания (пусто — без изменения): ")
             try:
-                store.update(service, username,
-                             password=(new_pwd if new_pwd else None),
-                             notes=(new_notes if new_notes else None))
+                store.update(
+                    service,
+                    username,
+                    password=(new_pwd if new_pwd else None),
+                    notes=(new_notes if new_notes else None),
+                )
             except StorageAccessError:
                 m = _prompt_secret("Мастер-пароль: ", "Мастер-пароль (видимый): ")
                 store = PasswordStore(JsonStorage(args.db, master=m))
-                store.update(service, username,
-                             password=(new_pwd if new_pwd else None),
-                             notes=(new_notes if new_notes else None))
+                store.update(
+                    service,
+                    username,
+                    password=(new_pwd if new_pwd else None),
+                    notes=(new_notes if new_notes else None),
+                )
             out(f"OK: обновлено {validate_service(service)}/{username}")
 
         elif op == "delete":
@@ -472,8 +498,12 @@ def cmd_wizard(args: argparse.Namespace, *, inp: Callable[[str], str] = input, o
 # -------------------- Аргументы --------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Простой локальный менеджер паролей (JSON)")
-    p.add_argument("--db", type=Path, default=default_db_path(),
-                   help="Путь к JSON-базе (по умолчанию рядом со скриптом/EXE).")
+    p.add_argument(
+        "--db",
+        type=Path,
+        default=default_db_path(),
+        help="Путь к JSON-базе (по умолчанию рядом со скриптом/EXE).",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pa = sub.add_parser("add", help="Создать запись: add <service> [username]")
@@ -492,7 +522,10 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--show", action="store_true", help="Показать всю запись JSON")
     pg.set_defaults(func=cmd_get)
 
-    pu = sub.add_parser("update", help="Обновить: update <service> <username> [--password ...] [--notes ...]")
+    pu = sub.add_parser(
+        "update",
+        help="Обновить: update <service> <username> [--password ...] [--notes ...]",
+    )
     pu.add_argument("service")
     pu.add_argument("username")
     pu.add_argument("--password", help="Новый пароль")
