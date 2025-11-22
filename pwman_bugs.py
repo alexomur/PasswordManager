@@ -6,12 +6,12 @@ import re
 import secrets
 import sys
 import tempfile
-import math  # BUG_FOR_LAB: неиспользуемый импорт (Ruff F401)
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from getpass import getpass
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
+import math  # BUG_FOR_LAB: неиспользуемый импорт
 
 # -------------------- Коды выхода --------------------
 EXIT_OK = 0
@@ -24,30 +24,29 @@ EXIT_EXISTS = 17
 DB_VERSION = 2
 
 # -------------------- ИСКУССТВЕННЫЕ ОШИБКИ ДЛЯ ЛАБЫ --------------------
-# 1) Захардкоженный пароль (Bandit B105, Ruff S105 при включённых security-правилах)
+# 1) Захардкоженный пароль
 HARDCODED_PASSWORD = "SuperSecret123"  # BUG_FOR_LAB: hardcoded password
 
-# 2) Конфликт типов для mypy + неиспользуемая переменная для Ruff
+# 2) Конфликт типов + неиспользуемая переменная
 def _debug_add_ints(a: int, b: int) -> int:
     return a + b
 
-debug_str: str = _debug_add_ints(1, 2)  # BUG_FOR_LAB: mypy — несовместимый тип (int -> str), Ruff — неиспользуемая переменная
+debug_str: str = _debug_add_ints(1, 2)  # BUG_FOR_LAB: несовместимый тип (int -> str)
 
-# 3) Небезопасный eval (Bandit B307)
+# 3) Небезопасный eval
 def _debug_eval(expr: str) -> Any:  # BUG_FOR_LAB: использование eval
     return eval(expr)
 
-# 4) Небезопасный mktemp (Bandit B108)
+# 4) Небезопасный mktemp
 def _insecure_tempfile() -> str:  # BUG_FOR_LAB: использование tempfile.mktemp()
     return tempfile.mktemp()
 
-_LEAK_BUCKET: List[bytes] = []  # BUG_FOR_LAB_MPROF: глобальное хранилище, никогда не очищается
+_LEAK_BUCKET: List[bytes] = []  # BUG_FOR_LAB: глобальное хранилище, никогда не очищается
 
 def run_leak_demo(iterations: int = 100) -> None:
     """
-    BUG_FOR_LAB_MPROF: искусственная утечка памяти для демонстрации работы mprof.
-    На каждой итерации добавляем ~100 KB в глобальный список и немного ждём,
-    чтобы mprof успевал снимать сэмплы.
+    BUG_FOR_LAB: искусственная утечка памяти.
+    На каждой итерации добавляем ~100 KB в глобальный список и немного ждём.
     """
     import time
     for i in range(iterations):
@@ -74,8 +73,10 @@ def validate_service(service: str) -> str:
     s = (service or "").strip()
     if not s:
         raise ValidationError("service не должен быть пустым")
-    if not _SERVICE_RE.match(s):
-        raise ValidationError("service содержит пробелы или слэши")
+    # BUG_FOR_LAB: ошибка в валидации — пропускаем проверку формата service
+    # (разрешаем пробелы и недопустимые символы)
+    # if not _SERVICE_RE.match(s):
+    #     raise ValidationError("service содержит пробелы или слэши")
     return s
 
 def validate_username(u: str) -> str:
@@ -240,8 +241,9 @@ class PasswordStore:
             return
 
         service_map: Dict[str, Dict[str, Any]] = services.setdefault(e.service, {})
-        if not overwrite and e.username in service_map:
-            raise EntryExistsError(f"{e.service}/{e.username}")
+        # BUG_FOR_LAB: дубликаты не считаем ошибкой — молча перезаписываем запись
+        # if not overwrite and e.username in service_map:
+        #     raise EntryExistsError(f"{e.service}/{e.username}")
         e.updated_at = Entry.now_iso()
         service_map[e.username] = asdict(e)
         _ensure_version(data)
@@ -259,8 +261,9 @@ class PasswordStore:
         username = validate_username(username)
         data = self.storage.load()
         entry = data.get("services", {}).get(service, {}).get(username)
+        # BUG_FOR_LAB: вместо ошибки при отсутствии записи возвращаем пустой словарь
         if not entry:
-            raise EntryNotFoundError(f"{service}/{username}")
+            return {}
         return entry
 
     def update(self, service: str, username: str, *, password: Optional[str] = None, notes: Optional[str] = None) -> None:

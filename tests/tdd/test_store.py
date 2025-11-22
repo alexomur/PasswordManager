@@ -1,6 +1,6 @@
 from __future__ import annotations
 import pytest
-import pwman
+import pwman_bugs as pwman
 
 
 def test_add_and_get(store):
